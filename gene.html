@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>FASTA Genetic Analyzer — Advanced</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@1.1.0"></script>
+
+  <style>
+    *{box-sizing:border-box}
+    body{font-family:Inter, "Segoe UI", Tahoma, Arial; background:#f3f6fb; margin:0; padding:20px;}
+    header{background:#0f172a;color:#fff;padding:18px;border-radius:10px}
+    header h1{margin:0;font-size:1.4rem}
+    main{max-width:1100px;margin:18px auto;background:#fff;padding:18px;border-radius:12px;box-shadow:0 6px 20px rgba(12,18,36,0.06)}
+    .row{display:flex;gap:12px;flex-wrap:wrap}
+    .card{flex:1;min-width:260px;padding:12px;border-radius:8px;background:#f8fafc;border:1px solid #e6eef8;overflow:auto;}
+    label{display:block;margin-bottom:6px;font-weight:600;font-size:0.95rem}
+    input[type=file]{width:100%}
+    input[type=number], input[type=text], select{width:100%;padding:8px;border-radius:6px;border:1px solid #cddff4}
+    button{padding:10px 14px;border-radius:8px;border:none;cursor:pointer;margin-top:6px}
+    button.primary{background:#0ea5e9;color:#fff}
+    button.ghost{background:#eef2ff;color:#0f172a;margin-left:6px}
+    pre{background:#0f172a;color:#e6f0ff;padding:12px;border-radius:8px;white-space:pre-wrap;font-size:0.95rem;max-height:400px;overflow:auto}
+    canvas{background:#fff;border-radius:8px;padding:8px}
+    footer{margin-top:14px;text-align:center;color:#6b7280;font-size:0.9rem}
+    .small{font-size:0.85rem;color:#374151}
+    .inline{display:inline-block}
+  </style>
+</head>
+<body>
+<header>
+  <h1>FASTA Gene Analyzer </h1>
+  <div class="small"></div>
+</header>
+
+<main>
+  <div class="row">
+    <div class="card">
+      <label>Upload FASTA file</label>
+      <input type="file" id="fastaFile" accept=".fasta,.fa,.txt">
+      <label class="small" style="margin-top:8px">Primer length (default 20)</label>
+      <input type="number" id="primerLen" value="20" min="6" max="60">
+      <label class="small">Salt concentration (Na⁺) in mM (affects Tm)</label>
+      <input type="number" id="saltConc" value="50" min="0" step="1">
+      <label class="small">Primer concentration (nM)</label>
+      <input type="number" id="primerConc" value="250" min="1" step="1">
+      <div>
+        <button class="primary" onclick="analyzeFASTA()">Analyze</button>
+        <button class="ghost" onclick="downloadCSV()">Download CSV</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <label>Summary</label>
+      <pre id="summary">No file uploaded yet.</pre>
+    </div>
+  </div>
+
+  <div style="margin-top:16px" class="row">
+    <div class="card" style="flex:2">
+      <label>Base composition</label>
+      <canvas id="baseChart"></canvas>
+      <div class="small">This chart is showing the proportion of A, T, G, C bases.</div>
+    </div>
+    <div class="card" style="flex:3">
+      <label>GC% and Tm across sliding window</label>
+      <canvas id="gcTmChart"></canvas>
+      <div class="small">This chart is showing GC content and Tm along the sequence. </div>
+    </div>
+  </div>
+
+  <div style="margin-top:12px" class="row">
+    <div class="card" style="flex:1 1 100%">
+      <label>Primer details & checks</label>
+      <pre id="primerDetails">No analysis performed yet.</pre>
+    </div>
+    <div class="card">
+      <label>Best primers</label>
+      <pre id="bestPrimers">No analysis performed yet.</pre>
+    </div>
+    <div class="card">
+      <label>Notes</label>
+      <div class="small"> <ul>
+    <li>Best primers selection criteria: Tm between 55–65°C ,GC content: maintained between 55–65%, avoid hairpins and self-dimers.</li>
+    
+    <li> All primers are shown regardless of quality.</li>
+    <li>Tm calculation: using the nearest-neighbor method with salt correction and secondary structure checks.</li>
+    <li>These are computational predictions and may differ from experimental laboratory results.</li>
+  </ul>
+</div>
+    </div>
+  </div>
+
+  <footer>Developed by Sarah Ali @2025 </footer>
+</main>
+
+<script>
+const NN_TABLE = {
+  'AA': [-7.9, -22.2], 'TT': [-7.9, -22.2],
+  'AT': [-7.2, -20.4], 'TA': [-7.2, -21.3],
+  'CA': [-8.5, -22.7], 'TG': [-8.5, -22.7],
+  'GT': [-8.4, -22.4], 'AC': [-8.4, -22.4],
+  'CT': [-7.8, -21.0], 'AG': [-7.8, -21.0],
+  'GA': [-8.2, -22.2], 'TC': [-8.2, -22.2],
+  'CG': [-10.6, -27.2],'GC': [-9.8, -24.4],
+  'GG': [-8.0, -19.9],'CC': [-8.0, -19.9]
+};
+
+function analyzeFASTA() {
+  const fileInput = document.getElementById('fastaFile');
+  const summaryEl = document.getElementById('summary');
+  const primerDetailsEl = document.getElementById('primerDetails');
+  const bestPrimersEl = document.getElementById('bestPrimers');
+
+  if (!fileInput.files.length) { alert('Please upload a FASTA file first.'); return; }
+
+  const primerLen = parseInt(document.getElementById('primerLen').value) || 20;
+  const saltConc = parseFloat(document.getElementById('saltConc').value) || 50;
+  const primerConc_nM = parseFloat(document.getElementById('primerConc').value) || 250;
+
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const text = e.target.result;
+    const seqs = parseFASTA(text);
+    if (!seqs.length) { summaryEl.textContent = 'No sequences found.'; return; }
+    const header = seqs[0].header || 'sequence1';
+    const seq = seqs[0].sequence.toUpperCase().replace(/[^ATGC]/g,'');
+
+    const totalLength = seq.length;
+    if (!totalLength) { summaryEl.textContent = 'Sequence is empty or invalid.'; return; }
+
+    const counts = {A:0,T:0,G:0,C:0};
+    for (let c of seq) if (counts[c]!==undefined) counts[c]++;
+
+    const gcContent = ((counts.G + counts.C)/totalLength*100).toFixed(2);
+
+    const primerConc_M = primerConc_nM * 1e-9;
+    const salt_M = saltConc / 1000;
+
+    const primers = [];
+    for (let i=0; i<=totalLength-primerLen; i++){
+      const fPrimer = seq.slice(i,i+primerLen);
+      const rPrimer = reverseComplement(fPrimer);
+      const fTm = calcTmNearestNeighbor(fPrimer, primerConc_M, salt_M);
+      const rTm = calcTmNearestNeighbor(rPrimer, primerConc_M, salt_M);
+      const selfDimerF = detectDimer(fPrimer,fPrimer);
+      const selfDimerR = detectDimer(rPrimer,rPrimer);
+      const gcF = (fPrimer.replace(/[^GC]/g,'').length/fPrimer.length*100).toFixed(1);
+      const gcR = (rPrimer.replace(/[^GC]/g,'').length/rPrimer.length*100).toFixed(1);
+      primers.push({pos:i+1,fPrimer,rPrimer,fTm,rTm,gcF,gcR,selfDimerF,selfDimerR});
+    }
+
+    // Best 3 primers by Tm
+    let bestPrimers = primers.filter(p=>p.fTm>=55 && p.fTm<=65 && p.rTm>=55 && p.rTm<=65);
+    let bestPrimersText = '';
+    if(bestPrimers.length===0){
+      bestPrimersText = "No good primers found with ideal Tm/GC/hairpin conditions.\nDisplaying all primers for review.";
+    } else {
+      bestPrimers = bestPrimers.slice(0,3);
+      bestPrimersText = bestPrimers.map((p,i)=>`Primer ${i+1} (pos ${p.pos}): Forward=${p.fPrimer} (Tm=${p.fTm.toFixed(1)}°C, GC=${p.gcF}%, SelfDimer=${p.selfDimerF.length}) | Reverse=${p.rPrimer} (Tm=${p.rTm.toFixed(1)}°C, GC=${p.gcR}%, SelfDimer=${p.selfDimerR.length})`).join("\n");
+    }
+
+    summaryEl.textContent = `Name: ${header}\nLength: ${totalLength} bases\nGC%: ${gcContent}%\nTotal primers: ${primers.length}`;
+    primerDetailsEl.textContent = primers.slice(0,20).map(p=>`Pos ${p.pos}: F=${p.fPrimer} (Tm=${p.fTm.toFixed(1)}°C, GC=${p.gcF}%, SelfDimer=${p.selfDimerF.length}) | R=${p.rPrimer} (Tm=${p.rTm.toFixed(1)}°C, GC=${p.gcR}%, SelfDimer=${p.selfDimerR.length})`).join('\n') + (primers.length>20 ? `\n...and ${primers.length-20} more primers` : '');
+    bestPrimersEl.textContent = bestPrimersText;
+
+    drawBaseChart(counts);
+    const windowSize = Math.min(20, Math.max(8, Math.floor(totalLength/10)));
+    const {gcArr, tmArr} = slidingGcTm(seq, windowSize, primerConc_M, salt_M);
+    drawGcTmChart(gcArr, tmArr);
+
+    window.lastAnalysis = {header, seq, totalLength, counts, gcContent, primers, bestPrimers, bestPrimersText, gcArr, tmArr};
+  };
+  reader.readAsText(fileInput.files[0]);
+}
+
+/* ====== Helpers ====== */
+function parseFASTA(text){ const lines=text.split(/\r?\n/); const seqs=[]; let header='',seq=''; for(let L of lines){ L=L.trim(); if(!L) continue; if(L.startsWith('>')){ if(seq) seqs.push({header,sequence:seq}); header=L.substring(1).trim(); seq=''; } else seq+=L; } if(seq) seqs.push({header,sequence:seq}); return seqs; }
+function reverseComplement(s){ const comp={'A':'T','T':'A','G':'C','C':'G','N':'N'}; return s.split('').reverse().map(c=>comp[c]||'N').join(''); }
+function calcTmNearestNeighbor(seq, primerConc_M, salt_M){ const R=1.987; let dH=0,dS=0; for(let i=0;i<seq.length-1;i++){ const pair=seq.slice(i,i+2); const vals=NN_TABLE[pair]; if(vals){dH+=vals[0]; dS+=vals[1];} } if(seq[0]==='A'||seq[0]==='T'){dH+=2.2;dS+=6.9;} if(seq[seq.length-1]==='A'||seq[seq.length-1]==='T'){dH+=2.2;dS+=6.9;} const dH_cal=dH*1000; const Ceff=Math.max(primerConc_M,1e-12); const denominator=dS+R*Math.log(Ceff/4.0); let tmK=dH_cal/denominator; const salt=Math.max(salt_M,1e-8); const salt_correction=16.6*Math.log10(salt*1000); return tmK-273.15+salt_correction; }
+function slidingGcTm(seq,windowSize,primerConc_M,salt_M){ const n=Math.max(1,seq.length-windowSize+1); const gcArr=[],tmArr=[]; for(let i=0;i<n;i++){ const sub=seq.slice(i,i+windowSize); const g=(sub.match(/G/g)||[]).length; const c=(sub.match(/C/g)||[]).length; gcArr.push((g+c)/sub.length*100); tmArr.push(calcTmNearestNeighbor(sub,primerConc_M,salt_M)); } return {gcArr,tmArr}; }
+function detectDimer(a,b,minLen=4){ const revB=reverseComplement(b); const matches=[]; for(let i=0;i<=a.length-minLen;i++){ for(let j=0;j<=revB.length-minLen;j++){ let k=0; while(a[i+k]===revB[j+k]&&(i+k)<a.length&&(j+k)<revB.length){ k++; if(k>=minLen) matches.push({aPos:i,bPos:b.length-1-j-(k-1),length:k,seq:a.slice(i,i+k)}); if(k>30) break;} } } return matches; }
+
+/* ====== Charts ====== */
+let baseChart=null,gcTmChart=null;
+
+function drawBaseChart(counts){ const ctx=document.getElementById('baseChart').getContext('2d'); if(baseChart) baseChart.destroy(); baseChart=new Chart(ctx,{ type:'pie', data:{labels:Object.keys(counts),datasets:[{data:Object.values(counts)}]}, options:{responsive:true,plugins:{legend:{position:'bottom'}}} }); }
+
+function drawGcTmChart(gcArr,tmArr){ const ctx=document.getElementById('gcTmChart').getContext('2d'); if(gcTmChart) gcTmChart.destroy(); gcTmChart=new Chart(ctx,{ type:'line', data:{ labels:gcArr.map((_,i)=>i+1), datasets:[ {label:'GC %',data:gcArr,borderColor:'#2563eb',fill:false,tension:0.15,yAxisID:'y1'}, {label:'Tm (°C)',data:tmArr.map(v=>+v.toFixed(2)),borderColor:'#10b981',fill:false,tension:0.15,yAxisID:'y2'} ] }, options:{ responsive:true, interaction:{mode:'index',intersect:false}, scales:{ y1:{type:'linear',position:'left',title:{display:true,text:'GC %'}}, y2:{type:'linear',position:'right',title:{display:true,text:'Tm (°C)'}} }, plugins:{legend:{position:'bottom'}} } }); }
+
+/* ====== Download CSV ====== */
+function downloadCSV(){
+  if(!window.lastAnalysis){ alert('Run analysis first.'); return; }
+  const arr=[]; const a=window.lastAnalysis;
+  arr.push(['Header',a.header]);
+  arr.push(['Sequence Length',a.totalLength]);
+  arr.push(['GC%',a.gcContent]);
+  arr.push([]);
+  arr.push(['All primers']);
+  arr.push(['Pos','F_Primer','F_Tm','F_GC','F_SelfDimer','R_Primer','R_Tm','R_GC','R_SelfDimer']);
+  a.primers.forEach(p=>arr.push([p.pos,p.fPrimer,p.fTm.toFixed(2),p.gcF,p.selfDimerF.length,p.rPrimer,p.rTm.toFixed(2),p.gcR,p.selfDimerR.length]));
+  arr.push([]);
+  arr.push(['Best primers']);
+  arr.push(['Pos','F_Primer','F_Tm','R_Primer','R_Tm']);
+  a.bestPrimers.forEach(p=>arr.push([p.pos,p.fPrimer,p.fTm.toFixed(2),p.rPrimer,p.rTm.toFixed(2)]));
+  const csv = arr.map(r=>r.join(',')).join('\n');
+  const blob = new Blob([csv],{type:'text/csv'});
+  const url=URL.createObjectURL(blob);
+  const link=document.createElement('a'); link.href=url; link.download='fasta_analysis.csv'; link.click();
+  URL.revokeObjectURL(url);
+}
+</script>
+</body>
+</html>
+
+
+
+
+
